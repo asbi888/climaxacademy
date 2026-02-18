@@ -1,5 +1,5 @@
 import { cookies } from 'next/headers';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 
 export interface AuthUser {
   id: number;
@@ -18,30 +18,47 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
   if (!userId) return null;
 
   try {
-    const db = getDb();
-    const user = db.prepare(`
-      SELECT u.id, u.email, u.name, u.role, u.company_id, u.job_title, u.department,
-             c.name as company_name
-      FROM users u
-      LEFT JOIN companies c ON u.company_id = c.id
-      WHERE u.id = ?
-    `).get(Number(userId)) as AuthUser | undefined;
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, email, name, role, company_id, job_title, department, companies(name)')
+      .eq('id', Number(userId))
+      .single();
 
-    return user || null;
+    if (error || !user) return null;
+
+    return {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      company_id: user.company_id,
+      job_title: user.job_title,
+      department: user.department,
+      company_name: (user.companies as any)?.name || undefined,
+    };
   } catch {
     return null;
   }
 }
 
-export function validateCredentials(email: string, password: string) {
-  const db = getDb();
-  const user = db.prepare(`
-    SELECT u.id, u.email, u.name, u.role, u.company_id, u.job_title, u.department,
-           c.name as company_name
-    FROM users u
-    LEFT JOIN companies c ON u.company_id = c.id
-    WHERE u.email = ? AND u.password = ?
-  `).get(email, password) as AuthUser | undefined;
+export async function validateCredentials(email: string, password: string): Promise<AuthUser | null> {
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, email, name, role, company_id, job_title, department, companies(name)')
+    .eq('email', email)
+    .eq('password', password)
+    .single();
 
-  return user || null;
+  if (error || !user) return null;
+
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    company_id: user.company_id,
+    job_title: user.job_title,
+    department: user.department,
+    company_name: (user.companies as any)?.name || undefined,
+  };
 }

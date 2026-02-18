@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import type { QuizQuestion } from '@/db';
 
 export async function POST(request: Request) {
@@ -17,20 +17,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'moduleId and answers are required' }, { status: 400 });
   }
 
-  const db = getDb();
+  const { data: questions, error } = await supabase
+    .from('quiz_questions')
+    .select('*')
+    .eq('module_id', moduleId);
 
-  // Fetch all quiz questions for this module
-  const questions = db.prepare(`
-    SELECT * FROM quiz_questions WHERE module_id = ?
-  `).all(moduleId) as QuizQuestion[];
-
-  if (questions.length === 0) {
+  if (error || !questions || questions.length === 0) {
     return NextResponse.json({ error: 'No quiz questions found for this module' }, { status: 404 });
   }
 
-  // Grade answers
   let correctCount = 0;
-  const results = questions.map((q) => {
+  const results = (questions as QuizQuestion[]).map((q) => {
     const userAnswer = answers[String(q.id)];
     const isCorrect = userAnswer?.toLowerCase() === q.correct_option.toLowerCase();
     if (isCorrect) correctCount++;

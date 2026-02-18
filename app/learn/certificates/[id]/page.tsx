@@ -1,28 +1,10 @@
 import { redirect, notFound } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import { ArrowLeft, Award, Calendar, Hash } from 'lucide-react';
 import { formatDate } from '@/lib/utils';
 import CertificatePreview from '@/components/learner/CertificatePreview';
-
-interface CertificateDetailRow {
-  id: number;
-  user_id: number;
-  programme_id: number;
-  enrollment_id: number;
-  certificate_number: string;
-  issued_at: string;
-  valid_until: string;
-  pdf_url: string | null;
-  user_name: string;
-  user_email: string;
-  programme_title: string;
-  programme_slug: string;
-  category: string;
-  thumbnail_gradient: string;
-  duration_hours: number;
-}
 
 export default async function CertificateDetailPage({
   params,
@@ -33,24 +15,36 @@ export default async function CertificateDetailPage({
   if (!user) redirect('/login');
 
   const { id } = await params;
-  const db = getDb();
 
-  const certificate = db.prepare(`
-    SELECT c.*,
-           u.name as user_name, u.email as user_email,
-           p.title as programme_title, p.slug as programme_slug,
-           p.category, p.thumbnail_gradient, p.duration_hours
-    FROM certificates c
-    JOIN users u ON c.user_id = u.id
-    JOIN programmes p ON c.programme_id = p.id
-    WHERE c.id = ? AND c.user_id = ?
-  `).get(Number(id), user.id) as CertificateDetailRow | undefined;
+  const { data: cert } = await supabase
+    .from('certificates')
+    .select('*, users(name, email), programmes(title, slug, category, thumbnail_gradient, duration_hours)')
+    .eq('id', Number(id))
+    .eq('user_id', user.id)
+    .single();
 
-  if (!certificate) notFound();
+  if (!cert) notFound();
+
+  const certificate = {
+    id: cert.id,
+    user_id: cert.user_id,
+    programme_id: cert.programme_id,
+    enrollment_id: cert.enrollment_id,
+    certificate_number: cert.certificate_number,
+    issued_at: cert.issued_at,
+    valid_until: cert.valid_until,
+    pdf_url: cert.pdf_url,
+    user_name: (cert.users as any)?.name,
+    user_email: (cert.users as any)?.email,
+    programme_title: (cert.programmes as any)?.title,
+    programme_slug: (cert.programmes as any)?.slug,
+    category: (cert.programmes as any)?.category,
+    thumbnail_gradient: (cert.programmes as any)?.thumbnail_gradient,
+    duration_hours: (cert.programmes as any)?.duration_hours,
+  };
 
   return (
     <div className="space-y-8">
-      {/* Back link and header */}
       <div className="animate-slide-up">
         <Link
           href="/learn/certificates"
@@ -88,7 +82,6 @@ export default async function CertificateDetailPage({
         </div>
       </div>
 
-      {/* Certificate preview with download */}
       <div className="animate-slide-up stagger-1">
         <CertificatePreview
           certificate={{

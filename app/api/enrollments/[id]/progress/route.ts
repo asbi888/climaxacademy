@@ -1,25 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
-import type { Enrollment, Module, ModuleProgress, Programme } from '@/db';
-
-interface EnrollmentWithProgramme extends Enrollment {
-  title: string;
-  slug: string;
-  category: string;
-  duration_hours: number;
-  module_count: number;
-  thumbnail_gradient: string;
-  difficulty_level: string;
-}
-
-interface ModuleWithProgress extends Module {
-  progress_status: ModuleProgress['status'] | null;
-  started_at: string | null;
-  completed_at: string | null;
-  quiz_score: number | null;
-  time_spent_minutes: number;
-}
+import { supabase } from '@/db';
 
 export async function GET(
   request: Request,
@@ -31,37 +12,64 @@ export async function GET(
   const { id } = await params;
   const enrollmentId = Number(id);
 
-  const db = getDb();
+  const { data: enrollment, error: enrollError } = await supabase
+    .from('enrollments')
+    .select('*, programmes(title, slug, category, duration_hours, module_count, thumbnail_gradient, difficulty_level)')
+    .eq('id', enrollmentId)
+    .eq('user_id', user.id)
+    .single();
 
-  // Fetch enrollment with programme info
-  const enrollment = db.prepare(`
-    SELECT e.*, p.title, p.slug, p.category, p.duration_hours, p.module_count,
-           p.thumbnail_gradient, p.difficulty_level
-    FROM enrollments e
-    JOIN programmes p ON e.programme_id = p.id
-    WHERE e.id = ? AND e.user_id = ?
-  `).get(enrollmentId, user.id) as EnrollmentWithProgramme | undefined;
-
-  if (!enrollment) {
+  if (enrollError || !enrollment) {
     return NextResponse.json({ error: 'Enrollment not found' }, { status: 404 });
   }
 
-  // Fetch all modules for this programme with progress
-  const modules = db.prepare(`
-    SELECT m.*,
-           mp.status as progress_status,
-           mp.started_at,
-           mp.completed_at,
-           mp.quiz_score,
-           COALESCE(mp.time_spent_minutes, 0) as time_spent_minutes
-    FROM modules m
-    LEFT JOIN module_progress mp ON mp.module_id = m.id AND mp.enrollment_id = ?
-    WHERE m.programme_id = ?
-    ORDER BY m.order_index ASC
-  `).all(enrollmentId, enrollment.programme_id) as ModuleWithProgress[];
+  const flatEnrollment = {
+    id: enrollment.id,
+    user_id: enrollment.user_id,
+    programme_id: enrollment.programme_id,
+    enrolled_at: enrollment.enrolled_at,
+    status: enrollment.status,
+    completion_pct: enrollment.completion_pct,
+    completed_at: enrollment.completed_at,
+    title: (enrollment.programmes as any)?.title,
+    slug: (enrollment.programmes as any)?.slug,
+    category: (enrollment.programmes as any)?.category,
+    duration_hours: (enrollment.programmes as any)?.duration_hours,
+    module_count: (enrollment.programmes as any)?.module_count,
+    thumbnail_gradient: (enrollment.programmes as any)?.thumbnail_gradient,
+    difficulty_level: (enrollment.programmes as any)?.difficulty_level,
+  };
+
+  const { data: modules } = await supabase
+    .from('modules')
+    .select('*')
+    .eq('programme_id', enrollment.programme_id)
+    .order('order_index');
+
+  const { data: progressRecords } = await supabase
+    .from('module_progress')
+    .select('*')
+    .eq('enrollment_id', enrollmentId);
+
+  const progressMap = new Map<number, any>();
+  for (const p of progressRecords || []) {
+    progressMap.set(p.module_id, p);
+  }
+
+  const modulesWithProgress = (modules || []).map((m: any) => {
+    const prog = progressMap.get(m.id);
+    return {
+      ...m,
+      progress_status: prog?.status || null,
+      started_at: prog?.started_at || null,
+      completed_at: prog?.completed_at || null,
+      quiz_score: prog?.quiz_score || null,
+      time_spent_minutes: prog?.time_spent_minutes || 0,
+    };
+  });
 
   return NextResponse.json({
-    enrollment,
-    modules,
+    enrollment: flatEnrollment,
+    modules: modulesWithProgress,
   });
 }

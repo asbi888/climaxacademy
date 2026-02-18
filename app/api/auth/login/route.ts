@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Email and password required' }, { status: 400 });
     }
 
-    const user = validateCredentials(email, password);
+    const user = await validateCredentials(email, password);
 
     if (!user) {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
@@ -21,16 +21,15 @@ export async function POST(request: NextRequest) {
       redirect: user.role === 'learner' ? '/learn' : '/dashboard',
     });
 
-    // Set cookies
     response.cookies.set('user_id', String(user.id), {
       httpOnly: true,
       sameSite: 'lax',
       path: '/',
-      maxAge: 60 * 60 * 24, // 24 hours
+      maxAge: 60 * 60 * 24,
     });
 
     response.cookies.set('user_role', user.role, {
-      httpOnly: false, // Readable by client for UI
+      httpOnly: false,
       sameSite: 'lax',
       path: '/',
       maxAge: 60 * 60 * 24,

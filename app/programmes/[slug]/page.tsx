@@ -13,7 +13,7 @@ import {
   Target,
   Sparkles,
 } from 'lucide-react';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import type { Programme, Module } from '@/db';
 import Navbar from '@/components/ui/Navbar';
 import Footer from '@/components/ui/Footer';
@@ -106,10 +106,11 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const db = getDb();
-  const programme = db
-    .prepare('SELECT title, short_description FROM programmes WHERE slug = ?')
-    .get(slug) as { title: string; short_description: string } | undefined;
+  const { data: programme } = await supabase
+    .from('programmes')
+    .select('title, short_description')
+    .eq('slug', slug)
+    .maybeSingle();
 
   if (!programme) {
     return { title: 'Programme Not Found | Climax Academy' };
@@ -130,25 +131,31 @@ export default async function ProgrammeDetailPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const db = getDb();
-
-  const programme = db
-    .prepare('SELECT * FROM programmes WHERE slug = ?')
-    .get(slug) as Programme | undefined;
+  const { data: programme } = await supabase
+    .from('programmes')
+    .select('*')
+    .eq('slug', slug)
+    .maybeSingle();
 
   if (!programme) {
     notFound();
   }
 
-  const modules = db
-    .prepare('SELECT * FROM modules WHERE programme_id = ? ORDER BY order_index')
-    .all(programme.id) as Module[];
+  const { data: modulesData } = await supabase
+    .from('modules')
+    .select('*')
+    .eq('programme_id', programme.id)
+    .order('order_index');
+  const modules = (modulesData || []) as Module[];
 
-  const relatedProgrammes = db
-    .prepare(
-      'SELECT * FROM programmes WHERE category = ? AND id != ? ORDER BY id LIMIT 3'
-    )
-    .all(programme.category, programme.id) as Programme[];
+  const { data: relatedData } = await supabase
+    .from('programmes')
+    .select('*')
+    .eq('category', programme.category)
+    .neq('id', programme.id)
+    .order('id')
+    .limit(3);
+  const relatedProgrammes = (relatedData || []) as Programme[];
 
   const learningOutcomes =
     categoryLearningOutcomes[programme.category] || defaultLearningOutcomes;

@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { Users, Search, Award } from 'lucide-react';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import ProgressBar from '@/components/ui/ProgressBar';
 
 interface Employee {
@@ -22,25 +22,60 @@ export default async function EmployeesPage() {
     redirect('/login');
   }
 
-  const db = getDb();
   const companyId = user.company_id;
 
-  const employees = db.prepare(`
-    SELECT
-      u.id,
-      u.name,
-      u.email,
-      u.job_title,
-      u.department,
-      COUNT(e.id) AS enrollments_count,
-      COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS avg_completion,
-      (SELECT COUNT(*) FROM certificates c WHERE c.user_id = u.id) AS certificates_count
-    FROM users u
-    LEFT JOIN enrollments e ON u.id = e.user_id
-    WHERE u.company_id = ? AND u.role = 'learner'
-    GROUP BY u.id
-    ORDER BY u.name ASC
-  `).all(companyId) as Employee[];
+  // Fetch learner users for this company
+  const { data: userRows } = await supabase
+    .from('users')
+    .select('id, name, email, job_title, department')
+    .eq('company_id', companyId)
+    .eq('role', 'learner')
+    .order('name');
+
+  const userIds = (userRows || []).map((u: any) => u.id);
+
+  // Fetch enrollments for these users
+  const { data: enrollmentRows } = await supabase
+    .from('enrollments')
+    .select('id, user_id, completion_pct')
+    .in('user_id', userIds.length > 0 ? userIds : [-1]);
+
+  // Fetch certificates for these users
+  const { data: certRows } = await supabase
+    .from('certificates')
+    .select('user_id')
+    .in('user_id', userIds.length > 0 ? userIds : [-1]);
+
+  // Build lookup maps
+  const enrollmentsByUser = new Map<number, any[]>();
+  for (const e of enrollmentRows || []) {
+    if (!enrollmentsByUser.has(e.user_id)) enrollmentsByUser.set(e.user_id, []);
+    enrollmentsByUser.get(e.user_id)!.push(e);
+  }
+
+  const certCountByUser = new Map<number, number>();
+  for (const c of certRows || []) {
+    certCountByUser.set(c.user_id, (certCountByUser.get(c.user_id) || 0) + 1);
+  }
+
+  // Compute employee data
+  const employees: Employee[] = (userRows || []).map((u: any) => {
+    const userEnrollments = enrollmentsByUser.get(u.id) || [];
+    const enrollmentsCount = userEnrollments.length;
+    const avgCompletion = enrollmentsCount > 0
+      ? Math.round((userEnrollments.reduce((s: number, e: any) => s + (e.completion_pct || 0), 0) / enrollmentsCount) * 10) / 10
+      : 0;
+    return {
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      job_title: u.job_title,
+      department: u.department,
+      enrollments_count: enrollmentsCount,
+      avg_completion: avgCompletion,
+      certificates_count: certCountByUser.get(u.id) || 0,
+    };
+  });
 
   return (
     <div className="space-y-8 animate-fade-in">

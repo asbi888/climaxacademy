@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import type { Module, Programme, Enrollment, ModuleProgress, QuizQuestion } from '@/db';
 import { formatMinutes, getContentTypeLabel } from '@/lib/utils';
 import VideoPlaceholder from '@/components/learner/VideoPlaceholder';
@@ -37,41 +37,48 @@ export default async function ModuleContentPage({
   const { slug, id } = await params;
   const moduleId = Number(id);
 
-  const db = getDb();
-
-  // Fetch programme
-  const programme = db.prepare(`
-    SELECT * FROM programmes WHERE slug = ?
-  `).get(slug) as Programme | undefined;
+  const { data: programme } = await supabase
+    .from('programmes')
+    .select('*')
+    .eq('slug', slug)
+    .single();
 
   if (!programme) redirect('/learn');
 
-  // Fetch enrollment
-  const enrollment = db.prepare(`
-    SELECT * FROM enrollments WHERE user_id = ? AND programme_id = ?
-  `).get(user.id, programme.id) as Enrollment | undefined;
+  const { data: enrollment } = await supabase
+    .from('enrollments')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('programme_id', programme.id)
+    .single();
 
   if (!enrollment) redirect('/learn');
 
-  // Fetch current module
-  const module_ = db.prepare(`
-    SELECT * FROM modules WHERE id = ? AND programme_id = ?
-  `).get(moduleId, programme.id) as Module | undefined;
+  const { data: module_ } = await supabase
+    .from('modules')
+    .select('*')
+    .eq('id', moduleId)
+    .eq('programme_id', programme.id)
+    .single();
 
   if (!module_) redirect(`/learn/programme/${slug}`);
 
-  // Fetch module progress
-  const progress = db.prepare(`
-    SELECT * FROM module_progress WHERE module_id = ? AND enrollment_id = ?
-  `).get(moduleId, enrollment.id) as ModuleProgress | undefined;
+  const { data: progress } = await supabase
+    .from('module_progress')
+    .select('*')
+    .eq('module_id', moduleId)
+    .eq('enrollment_id', enrollment.id)
+    .maybeSingle();
 
   const isCompleted = progress?.status === 'completed';
 
-  // Fetch all modules for navigation
-  const allModules = db.prepare(`
-    SELECT id, title, order_index FROM modules WHERE programme_id = ? ORDER BY order_index ASC
-  `).all(programme.id) as { id: number; title: string; order_index: number }[];
+  const { data: allModulesRaw } = await supabase
+    .from('modules')
+    .select('id, title, order_index')
+    .eq('programme_id', programme.id)
+    .order('order_index');
 
+  const allModules = allModulesRaw || [];
   const currentIndex = allModules.findIndex((m) => m.id === moduleId);
   const prevModule = currentIndex > 0
     ? { id: allModules[currentIndex - 1].id, title: allModules[currentIndex - 1].title }
@@ -80,12 +87,13 @@ export default async function ModuleContentPage({
     ? { id: allModules[currentIndex + 1].id, title: allModules[currentIndex + 1].title }
     : null;
 
-  // Fetch quiz questions if this is a quiz module
   let quizQuestions: QuizQuestion[] = [];
   if (module_.content_type === 'quiz') {
-    quizQuestions = db.prepare(`
-      SELECT * FROM quiz_questions WHERE module_id = ?
-    `).all(moduleId) as QuizQuestion[];
+    const { data: qq } = await supabase
+      .from('quiz_questions')
+      .select('*')
+      .eq('module_id', moduleId);
+    quizQuestions = (qq || []) as QuizQuestion[];
   }
 
   const ContentTypeIcon = contentTypeIcons[module_.content_type] || FileText;
@@ -193,7 +201,7 @@ export default async function ModuleContentPage({
               <div className="glass-card p-8">
                 <div className="prose prose-sm max-w-none">
                   <div className="text-brand-text/90 leading-relaxed space-y-4">
-                    {module_.content_text.split('\n').map((paragraph, idx) => (
+                    {module_.content_text.split('\n').map((paragraph: string, idx: number) => (
                       <p key={idx}>{paragraph}</p>
                     ))}
                   </div>

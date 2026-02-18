@@ -1,41 +1,36 @@
 import { redirect } from 'next/navigation';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import { Award, Trophy } from 'lucide-react';
 import CertificateCard, { type CertificateCardData } from '@/components/learner/CertificateCard';
-
-interface CertificateRow {
-  id: number;
-  user_id: number;
-  programme_id: number;
-  enrollment_id: number;
-  certificate_number: string;
-  issued_at: string;
-  valid_until: string;
-  pdf_url: string | null;
-  programme_title: string;
-  programme_slug: string;
-  category: string;
-  thumbnail_gradient: string;
-}
 
 export default async function CertificatesPage() {
   const user = await getCurrentUser();
   if (!user) redirect('/login');
 
-  const db = getDb();
-  const certificates = db.prepare(`
-    SELECT c.*, p.title as programme_title, p.slug as programme_slug,
-           p.category, p.thumbnail_gradient
-    FROM certificates c
-    JOIN programmes p ON c.programme_id = p.id
-    WHERE c.user_id = ?
-    ORDER BY c.issued_at DESC
-  `).all(user.id) as CertificateRow[];
+  const { data: certificates } = await supabase
+    .from('certificates')
+    .select('*, programmes(title, slug, category, thumbnail_gradient)')
+    .eq('user_id', user.id)
+    .order('issued_at', { ascending: false });
+
+  const flat = (certificates || []).map((c: any) => ({
+    id: c.id,
+    user_id: c.user_id,
+    programme_id: c.programme_id,
+    enrollment_id: c.enrollment_id,
+    certificate_number: c.certificate_number,
+    issued_at: c.issued_at,
+    valid_until: c.valid_until,
+    pdf_url: c.pdf_url,
+    programme_title: c.programmes?.title,
+    programme_slug: c.programmes?.slug,
+    category: c.programmes?.category,
+    thumbnail_gradient: c.programmes?.thumbnail_gradient,
+  }));
 
   return (
     <div className="space-y-8">
-      {/* Header */}
       <div className="animate-slide-up">
         <div className="flex items-center gap-3 mb-2">
           <div className="w-10 h-10 rounded-xl bg-sky-500/10 flex items-center justify-center">
@@ -48,8 +43,7 @@ export default async function CertificatesPage() {
         </div>
       </div>
 
-      {/* Certificate grid or empty state */}
-      {certificates.length === 0 ? (
+      {flat.length === 0 ? (
         <div className="glass-card p-16 text-center animate-slide-up stagger-1">
           <div className="w-20 h-20 rounded-2xl bg-sky-500/10 flex items-center justify-center mx-auto mb-6">
             <Trophy className="w-10 h-10 text-sky-400/60" />
@@ -63,7 +57,7 @@ export default async function CertificatesPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {certificates.map((cert, idx) => (
+          {flat.map((cert: any, idx: number) => (
             <CertificateCard
               key={cert.id}
               certificate={cert as CertificateCardData}

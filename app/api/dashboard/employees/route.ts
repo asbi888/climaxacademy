@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import { getCurrentUser } from '@/lib/auth';
 
 export async function GET() {
@@ -9,25 +9,54 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const db = getDb();
   const companyId = user.company_id;
 
-  const employees = db.prepare(`
-    SELECT
-      u.id,
-      u.name,
-      u.email,
-      u.job_title,
-      u.department,
-      COUNT(e.id) AS enrollments_count,
-      COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS avg_completion,
-      (SELECT COUNT(*) FROM certificates c WHERE c.user_id = u.id) AS certificates_count
-    FROM users u
-    LEFT JOIN enrollments e ON u.id = e.user_id
-    WHERE u.company_id = ? AND u.role = 'learner'
-    GROUP BY u.id
-    ORDER BY avg_completion DESC
-  `).all(companyId);
+  // Get learners in company
+  const { data: learners } = await supabase
+    .from('users')
+    .select('id, name, email, job_title, department')
+    .eq('company_id', companyId!)
+    .eq('role', 'learner');
+
+  if (!learners || learners.length === 0) {
+    return NextResponse.json([]);
+  }
+
+  const learnerIds = learners.map((l: any) => l.id);
+
+  // Get enrollments for these learners
+  const { data: enrollments } = await supabase
+    .from('enrollments')
+    .select('user_id, completion_pct')
+    .in('user_id', learnerIds);
+
+  // Get certificates for these learners
+  const { data: certificates } = await supabase
+    .from('certificates')
+    .select('user_id')
+    .in('user_id', learnerIds);
+
+  // Build per-user stats
+  const employees = learners.map((l: any) => {
+    const userEnrollments = (enrollments || []).filter((e: any) => e.user_id === l.id);
+    const userCerts = (certificates || []).filter((c: any) => c.user_id === l.id);
+    const avgCompletion = userEnrollments.length > 0
+      ? Math.round((userEnrollments.reduce((s: number, e: any) => s + (e.completion_pct || 0), 0) / userEnrollments.length) * 10) / 10
+      : 0;
+
+    return {
+      id: l.id,
+      name: l.name,
+      email: l.email,
+      job_title: l.job_title,
+      department: l.department,
+      enrollments_count: userEnrollments.length,
+      avg_completion: avgCompletion,
+      certificates_count: userCerts.length,
+    };
+  });
+
+  employees.sort((a: any, b: any) => b.avg_completion - a.avg_completion);
 
   return NextResponse.json(employees);
 }

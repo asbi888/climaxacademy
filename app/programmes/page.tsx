@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import type { Programme } from '@/db';
 import Navbar from '@/components/ui/Navbar';
 import Footer from '@/components/ui/Footer';
@@ -12,15 +12,14 @@ export const metadata: Metadata = {
     'Discover world-class corporate training programmes in leadership, communication, conflict resolution, and more. Powered by Climax Production Ltd.',
 };
 
-export default function ProgrammesPage() {
-  const db = getDb();
+export default async function ProgrammesPage() {
+  const { data: programmes } = await supabase
+    .from('programmes')
+    .select('*')
+    .order('id');
 
-  const programmes = db
-    .prepare('SELECT * FROM programmes ORDER BY id')
-    .all() as Programme[];
-
-  // Extract unique categories
-  const categories = [...new Set(programmes.map((p) => p.category))];
+  const allProgrammes = (programmes || []) as Programme[];
+  const categories = [...new Set(allProgrammes.map((p) => p.category))];
 
   return (
     <div className="min-h-screen bg-brand-bg">
@@ -28,7 +27,6 @@ export default function ProgrammesPage() {
 
       {/* Hero section */}
       <section className="relative pt-32 pb-16 overflow-hidden">
-        {/* Background radials */}
         <div
           className="absolute inset-0"
           style={{
@@ -63,7 +61,7 @@ export default function ProgrammesPage() {
       <section className="pb-24">
         <Container>
           <ProgrammeCatalogueClient
-            programmes={programmes}
+            programmes={allProgrammes}
             categories={categories}
           />
         </Container>

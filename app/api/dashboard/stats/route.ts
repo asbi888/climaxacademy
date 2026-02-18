@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import { getCurrentUser } from '@/lib/auth';
 
 export async function GET() {
@@ -9,45 +9,55 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const db = getDb();
   const companyId = user.company_id;
 
-  // Total enrolled (distinct users with at least one enrollment)
-  const totalEnrolled = db.prepare(`
-    SELECT COUNT(DISTINCT e.user_id) AS count
-    FROM enrollments e
-    JOIN users u ON e.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { count: number };
+  // Get company users
+  const { data: companyUsers } = await supabase
+    .from('users')
+    .select('id')
+    .eq('company_id', companyId!);
 
-  // Average completion percentage across all enrollments
-  const avgCompletion = db.prepare(`
-    SELECT COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS avg
-    FROM enrollments e
-    JOIN users u ON e.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { avg: number };
+  const userIds = (companyUsers || []).map((u: any) => u.id);
 
-  // Certificates earned
-  const certificatesEarned = db.prepare(`
-    SELECT COUNT(*) AS count
-    FROM certificates c
-    JOIN users u ON c.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { count: number };
+  if (userIds.length === 0) {
+    return NextResponse.json({
+      totalEnrolled: 0,
+      avgCompletion: 0,
+      certificatesEarned: 0,
+      totalTrainingHours: 0,
+    });
+  }
 
-  // Total training hours (sum of time_spent_minutes from module_progress, converted to hours)
-  const totalTrainingHours = db.prepare(`
-    SELECT COALESCE(ROUND(SUM(mp.time_spent_minutes) / 60.0, 1), 0) AS hours
-    FROM module_progress mp
-    JOIN users u ON mp.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { hours: number };
+  // Enrollments for company users
+  const { data: enrollments } = await supabase
+    .from('enrollments')
+    .select('user_id, completion_pct')
+    .in('user_id', userIds);
+
+  const uniqueEnrolled = new Set((enrollments || []).map((e: any) => e.user_id)).size;
+  const avgCompletion = enrollments && enrollments.length > 0
+    ? Math.round(((enrollments.reduce((s: number, e: any) => s + (e.completion_pct || 0), 0)) / enrollments.length) * 10) / 10
+    : 0;
+
+  // Certificates
+  const { count: certificatesEarned } = await supabase
+    .from('certificates')
+    .select('*', { count: 'exact', head: true })
+    .in('user_id', userIds);
+
+  // Training hours
+  const { data: progressData } = await supabase
+    .from('module_progress')
+    .select('time_spent_minutes')
+    .in('user_id', userIds);
+
+  const totalMinutes = (progressData || []).reduce((s: number, p: any) => s + (p.time_spent_minutes || 0), 0);
+  const totalTrainingHours = Math.round((totalMinutes / 60) * 10) / 10;
 
   return NextResponse.json({
-    totalEnrolled: totalEnrolled.count,
-    avgCompletion: avgCompletion.avg,
-    certificatesEarned: certificatesEarned.count,
-    totalTrainingHours: totalTrainingHours.hours,
+    totalEnrolled: uniqueEnrolled,
+    avgCompletion,
+    certificatesEarned: certificatesEarned || 0,
+    totalTrainingHours,
   });
 }

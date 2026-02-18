@@ -1,17 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const category = searchParams.get('category');
 
-  const db = getDb();
-  let programmes;
+  let query = supabase.from('programmes').select('*').order('id');
 
   if (category && category !== 'All') {
-    programmes = db.prepare('SELECT * FROM programmes WHERE category = ? ORDER BY id').all(category);
-  } else {
-    programmes = db.prepare('SELECT * FROM programmes ORDER BY id').all();
+    query = query.eq('category', category);
+  }
+
+  const { data: programmes, error } = await query;
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
   return NextResponse.json(programmes);

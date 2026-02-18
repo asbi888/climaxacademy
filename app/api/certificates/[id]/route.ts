@@ -1,24 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
-
-interface CertificateRow {
-  id: number;
-  user_id: number;
-  programme_id: number;
-  enrollment_id: number;
-  certificate_number: string;
-  issued_at: string;
-  valid_until: string;
-  pdf_url: string | null;
-  user_name: string;
-  user_email: string;
-  programme_title: string;
-  programme_slug: string;
-  category: string;
-  thumbnail_gradient: string;
-  duration_hours: number;
-}
+import { supabase } from '@/db';
 
 export async function GET(
   _request: Request,
@@ -28,22 +10,35 @@ export async function GET(
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { id } = await params;
-  const db = getDb();
 
-  const certificate = db.prepare(`
-    SELECT c.*,
-           u.name as user_name, u.email as user_email,
-           p.title as programme_title, p.slug as programme_slug,
-           p.category, p.thumbnail_gradient, p.duration_hours
-    FROM certificates c
-    JOIN users u ON c.user_id = u.id
-    JOIN programmes p ON c.programme_id = p.id
-    WHERE c.id = ? AND c.user_id = ?
-  `).get(Number(id), user.id) as CertificateRow | undefined;
+  const { data: certificate, error } = await supabase
+    .from('certificates')
+    .select('*, users(name, email), programmes(title, slug, category, thumbnail_gradient, duration_hours)')
+    .eq('id', Number(id))
+    .eq('user_id', user.id)
+    .single();
 
-  if (!certificate) {
+  if (error || !certificate) {
     return NextResponse.json({ error: 'Certificate not found' }, { status: 404 });
   }
 
-  return NextResponse.json(certificate);
+  const flat = {
+    id: certificate.id,
+    user_id: certificate.user_id,
+    programme_id: certificate.programme_id,
+    enrollment_id: certificate.enrollment_id,
+    certificate_number: certificate.certificate_number,
+    issued_at: certificate.issued_at,
+    valid_until: certificate.valid_until,
+    pdf_url: certificate.pdf_url,
+    user_name: (certificate.users as any)?.name,
+    user_email: (certificate.users as any)?.email,
+    programme_title: (certificate.programmes as any)?.title,
+    programme_slug: (certificate.programmes as any)?.slug,
+    category: (certificate.programmes as any)?.category,
+    thumbnail_gradient: (certificate.programmes as any)?.thumbnail_gradient,
+    duration_hours: (certificate.programmes as any)?.duration_hours,
+  };
+
+  return NextResponse.json(flat);
 }

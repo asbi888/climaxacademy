@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import type { Module, ModuleProgress, Programme, Enrollment } from '@/db';
 import { formatMinutes, getContentTypeLabel, getCategoryColor, getDifficultyColor } from '@/lib/utils';
 import ProgressBar from '@/components/ui/ProgressBar';
@@ -33,37 +33,51 @@ export default async function ProgrammeLearningPage({
   if (!user) redirect('/login');
 
   const { slug } = await params;
-  const db = getDb();
-
-  // Fetch programme
-  const programme = db.prepare(`
-    SELECT * FROM programmes WHERE slug = ?
-  `).get(slug) as Programme | undefined;
+  const { data: programme } = await supabase
+    .from('programmes')
+    .select('*')
+    .eq('slug', slug)
+    .single();
 
   if (!programme) redirect('/learn');
 
-  // Fetch enrollment
-  const enrollment = db.prepare(`
-    SELECT * FROM enrollments WHERE user_id = ? AND programme_id = ?
-  `).get(user.id, programme.id) as Enrollment | undefined;
+  const { data: enrollment } = await supabase
+    .from('enrollments')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('programme_id', programme.id)
+    .single();
 
   if (!enrollment) redirect('/learn');
 
-  // Fetch modules with progress
-  const modules = db.prepare(`
-    SELECT m.*,
-           mp.status as progress_status,
-           mp.started_at,
-           mp.completed_at,
-           mp.quiz_score,
-           COALESCE(mp.time_spent_minutes, 0) as time_spent_minutes
-    FROM modules m
-    LEFT JOIN module_progress mp ON mp.module_id = m.id AND mp.enrollment_id = ?
-    WHERE m.programme_id = ?
-    ORDER BY m.order_index ASC
-  `).all(enrollment.id, programme.id) as ModuleWithProgress[];
+  const { data: modulesRaw } = await supabase
+    .from('modules')
+    .select('*')
+    .eq('programme_id', programme.id)
+    .order('order_index');
 
-  // Determine the current (first incomplete) module
+  const { data: progressRecords } = await supabase
+    .from('module_progress')
+    .select('*')
+    .eq('enrollment_id', enrollment.id);
+
+  const progressMap = new Map();
+  for (const p of progressRecords || []) {
+    progressMap.set(p.module_id, p);
+  }
+
+  const modules = (modulesRaw || []).map((m) => {
+    const prog = progressMap.get(m.id);
+    return {
+      ...m,
+      progress_status: prog?.status || null,
+      started_at: prog?.started_at || null,
+      completed_at: prog?.completed_at || null,
+      quiz_score: prog?.quiz_score || null,
+      time_spent_minutes: prog?.time_spent_minutes || 0,
+    };
+  });
+
   const currentModuleIndex = modules.findIndex(
     (m) => m.progress_status !== 'completed'
   );

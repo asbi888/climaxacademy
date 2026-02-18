@@ -1,20 +1,37 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const db = getDb();
-  const enrollments = db.prepare(`
-    SELECT e.*, p.title, p.slug, p.category, p.duration_hours, p.module_count,
-           p.thumbnail_gradient, p.difficulty_level
-    FROM enrollments e
-    JOIN programmes p ON e.programme_id = p.id
-    WHERE e.user_id = ?
-    ORDER BY e.enrolled_at DESC
-  `).all(user.id);
+  const { data: enrollments, error } = await supabase
+    .from('enrollments')
+    .select('*, programmes(title, slug, category, duration_hours, module_count, thumbnail_gradient, difficulty_level)')
+    .eq('user_id', user.id)
+    .order('enrolled_at', { ascending: false });
 
-  return NextResponse.json(enrollments);
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  const flat = (enrollments || []).map((e: any) => ({
+    id: e.id,
+    user_id: e.user_id,
+    programme_id: e.programme_id,
+    enrolled_at: e.enrolled_at,
+    status: e.status,
+    completion_pct: e.completion_pct,
+    completed_at: e.completed_at,
+    title: e.programmes?.title,
+    slug: e.programmes?.slug,
+    category: e.programmes?.category,
+    duration_hours: e.programmes?.duration_hours,
+    module_count: e.programmes?.module_count,
+    thumbnail_gradient: e.programmes?.thumbnail_gradient,
+    difficulty_level: e.programmes?.difficulty_level,
+  }));
+
+  return NextResponse.json(flat);
 }

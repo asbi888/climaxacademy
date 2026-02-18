@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { GraduationCap, Users, TrendingUp, Award, Brain } from 'lucide-react';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import ProgressBar from '@/components/ui/ProgressBar';
 
 interface ProgrammeAnalytics {
@@ -23,33 +23,91 @@ export default async function ProgrammesPage() {
     redirect('/login');
   }
 
-  const db = getDb();
   const companyId = user.company_id;
 
-  const programmes = db.prepare(`
-    SELECT
-      p.id,
-      p.title,
-      p.category,
-      p.duration_hours,
-      p.thumbnail_gradient,
-      COUNT(DISTINCT e.id) AS enrolled_count,
-      COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS avg_completion,
-      COALESCE(ROUND(AVG(
-        CASE WHEN mp.quiz_score IS NOT NULL THEN mp.quiz_score END
-      ), 1), 0) AS avg_quiz_score,
-      (
-        SELECT COUNT(*) FROM certificates c
-        JOIN users cu ON c.user_id = cu.id
-        WHERE c.programme_id = p.id AND cu.company_id = ?
-      ) AS certificates_count
-    FROM programmes p
-    LEFT JOIN enrollments e ON p.id = e.programme_id
-      AND e.user_id IN (SELECT id FROM users WHERE company_id = ?)
-    LEFT JOIN module_progress mp ON e.id = mp.enrollment_id
-    GROUP BY p.id
-    ORDER BY enrolled_count DESC
-  `).all(companyId, companyId) as ProgrammeAnalytics[];
+  // Fetch company user IDs
+  const { data: companyUsers } = await supabase
+    .from('users')
+    .select('id')
+    .eq('company_id', companyId);
+  const companyUserIds = (companyUsers || []).map((u: any) => u.id);
+
+  // Fetch all programmes
+  const { data: allProgrammes } = await supabase
+    .from('programmes')
+    .select('id, title, category, duration_hours, thumbnail_gradient');
+
+  // Fetch enrollments for company users
+  const { data: enrollmentRows } = await supabase
+    .from('enrollments')
+    .select('id, programme_id, completion_pct')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1]);
+
+  // Fetch module_progress quiz scores for those enrollments
+  const enrollmentIds = (enrollmentRows || []).map((e: any) => e.id);
+  const { data: progressRows } = await supabase
+    .from('module_progress')
+    .select('enrollment_id, quiz_score')
+    .in('enrollment_id', enrollmentIds.length > 0 ? enrollmentIds : [-1]);
+
+  // Fetch certificates for company users
+  const { data: certRows } = await supabase
+    .from('certificates')
+    .select('programme_id')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1]);
+
+  // Build lookup maps
+  const enrollmentsByProg = new Map<number, any[]>();
+  for (const e of enrollmentRows || []) {
+    if (!enrollmentsByProg.has(e.programme_id)) enrollmentsByProg.set(e.programme_id, []);
+    enrollmentsByProg.get(e.programme_id)!.push(e);
+  }
+
+  const quizScoresByEnrollment = new Map<number, number[]>();
+  for (const mp of progressRows || []) {
+    if (mp.quiz_score != null) {
+      if (!quizScoresByEnrollment.has(mp.enrollment_id)) quizScoresByEnrollment.set(mp.enrollment_id, []);
+      quizScoresByEnrollment.get(mp.enrollment_id)!.push(mp.quiz_score);
+    }
+  }
+
+  const certCountByProg = new Map<number, number>();
+  for (const c of certRows || []) {
+    certCountByProg.set(c.programme_id, (certCountByProg.get(c.programme_id) || 0) + 1);
+  }
+
+  // Compute programme analytics
+  const programmes: ProgrammeAnalytics[] = (allProgrammes || [])
+    .map((prog: any) => {
+      const enrollments = enrollmentsByProg.get(prog.id) || [];
+      const enrolledCount = enrollments.length;
+      const avgCompletion = enrolledCount > 0
+        ? Math.round((enrollments.reduce((s: number, e: any) => s + (e.completion_pct || 0), 0) / enrolledCount) * 10) / 10
+        : 0;
+
+      // Collect all quiz scores across enrollments for this programme
+      const allQuizScores: number[] = [];
+      for (const e of enrollments) {
+        const scores = quizScoresByEnrollment.get(e.id) || [];
+        allQuizScores.push(...scores);
+      }
+      const avgQuizScore = allQuizScores.length > 0
+        ? Math.round((allQuizScores.reduce((s: number, v: number) => s + v, 0) / allQuizScores.length) * 10) / 10
+        : 0;
+
+      return {
+        id: prog.id,
+        title: prog.title,
+        category: prog.category,
+        duration_hours: prog.duration_hours,
+        thumbnail_gradient: prog.thumbnail_gradient,
+        enrolled_count: enrolledCount,
+        avg_completion: avgCompletion,
+        avg_quiz_score: avgQuizScore,
+        certificates_count: certCountByProg.get(prog.id) || 0,
+      };
+    })
+    .sort((a: any, b: any) => b.enrolled_count - a.enrolled_count);
 
   return (
     <div className="space-y-8 animate-fade-in">

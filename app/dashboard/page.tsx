@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import { Users, TrendingUp, Award, Clock } from 'lucide-react';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import { getPlanTierColor, timeAgo } from '@/lib/utils';
 import KPICard from '@/components/dashboard/KPICard';
 import TopPerformers from '@/components/dashboard/TopPerformers';
@@ -15,59 +15,54 @@ export default async function DashboardPage() {
     redirect('/login');
   }
 
-  const db = getDb();
   const companyId = user.company_id;
 
+  // ---- Fetch company users ----
+  const { data: companyUsers } = await supabase
+    .from('users')
+    .select('id')
+    .eq('company_id', companyId);
+  const companyUserIds = (companyUsers || []).map((u: any) => u.id);
+
+  // ---- Fetch all enrollments for company users ----
+  const { data: allEnrollments } = await supabase
+    .from('enrollments')
+    .select('*, programmes(id, title, slug)')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1]);
+
+  const enrollmentsArr = allEnrollments || [];
+
   // ---- KPI Stats ----
-  const totalEnrolled = (db.prepare(`
-    SELECT COUNT(DISTINCT e.user_id) AS count
-    FROM enrollments e
-    JOIN users u ON e.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { count: number }).count;
+  const totalEnrolled = new Set(enrollmentsArr.map((e: any) => e.user_id)).size;
 
-  const avgCompletion = (db.prepare(`
-    SELECT COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS avg
-    FROM enrollments e
-    JOIN users u ON e.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { avg: number }).avg;
+  const avgCompletion = enrollmentsArr.length > 0
+    ? Math.round((enrollmentsArr.reduce((sum: number, e: any) => sum + (e.completion_pct || 0), 0) / enrollmentsArr.length) * 10) / 10
+    : 0;
 
-  const certificatesEarned = (db.prepare(`
-    SELECT COUNT(*) AS count
-    FROM certificates c
-    JOIN users u ON c.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { count: number }).count;
+  const { count: certificatesEarnedCount } = await supabase
+    .from('certificates')
+    .select('*', { count: 'exact', head: true })
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1]);
+  const certificatesEarned = certificatesEarnedCount || 0;
 
-  const totalTrainingHours = (db.prepare(`
-    SELECT COALESCE(ROUND(SUM(mp.time_spent_minutes) / 60.0, 1), 0) AS hours
-    FROM module_progress mp
-    JOIN users u ON mp.user_id = u.id
-    WHERE u.company_id = ?
-  `).get(companyId) as { hours: number }).hours;
+  const { data: mpRows } = await supabase
+    .from('module_progress')
+    .select('time_spent_minutes')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1]);
+
+  const totalTrainingHours = Math.round(((mpRows || []).reduce((sum: number, mp: any) => sum + (mp.time_spent_minutes || 0), 0) / 60.0) * 10) / 10;
 
   // ---- Chart Data ----
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  const enrollmentRaw = db.prepare(`
-    SELECT
-      strftime('%m', e.enrolled_at) AS month_num,
-      COUNT(*) AS count
-    FROM enrollments e
-    JOIN users u ON e.user_id = u.id
-    WHERE u.company_id = ?
-    GROUP BY month_num
-    ORDER BY month_num
-  `).all(companyId) as { month_num: string; count: number }[];
-
-  const monthMap = new Map<string, number>();
-  for (const row of enrollmentRaw) {
-    const idx = parseInt(row.month_num, 10) - 1;
-    monthMap.set(months[idx], row.count);
+  const monthCountMap = new Map<number, number>();
+  for (const e of enrollmentsArr) {
+    const d = new Date(e.enrolled_at);
+    const monthNum = d.getMonth() + 1;
+    monthCountMap.set(monthNum, (monthCountMap.get(monthNum) || 0) + 1);
   }
 
-  const allMonthNums = enrollmentRaw.map(r => parseInt(r.month_num, 10));
+  const allMonthNums = Array.from(monthCountMap.keys());
   const latestMonth = allMonthNums.length > 0 ? Math.max(...allMonthNums) : new Date().getMonth() + 1;
   const startMonth = Math.max(1, latestMonth - 5);
 
@@ -75,65 +70,94 @@ export default async function DashboardPage() {
   for (let m = startMonth; m <= latestMonth; m++) {
     enrollmentTrends.push({
       month: months[m - 1],
-      count: monthMap.get(months[m - 1]) || 0,
+      count: monthCountMap.get(m) || 0,
     });
   }
 
-  const completionByProgramme = db.prepare(`
-    SELECT
-      p.title AS name,
-      COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS completion
-    FROM programmes p
-    JOIN enrollments e ON p.id = e.programme_id
-    JOIN users u ON e.user_id = u.id
-    WHERE u.company_id = ?
-    GROUP BY p.id
-    ORDER BY completion DESC
-  `).all(companyId) as { name: string; completion: number }[];
+  // Completion by programme
+  const progMap = new Map<number, { name: string; total: number; count: number }>();
+  for (const e of enrollmentsArr) {
+    const pid = e.programme_id;
+    const pName = (e.programmes as any)?.title || 'Unknown';
+    if (!progMap.has(pid)) {
+      progMap.set(pid, { name: pName, total: 0, count: 0 });
+    }
+    const entry = progMap.get(pid)!;
+    entry.total += e.completion_pct || 0;
+    entry.count += 1;
+  }
+  const completionByProgramme = Array.from(progMap.values())
+    .map(p => ({ name: p.name, completion: Math.round((p.total / p.count) * 10) / 10 }))
+    .sort((a, b) => b.completion - a.completion);
 
-  // ---- Top Performers (top 5 by avg completion) ----
-  const topPerformers = db.prepare(`
-    SELECT
-      u.name,
-      u.department,
-      COALESCE(ROUND(AVG(e.completion_pct), 1), 0) AS avg_completion,
-      (SELECT COUNT(*) FROM certificates c WHERE c.user_id = u.id) AS certificates
-    FROM users u
-    JOIN enrollments e ON u.id = e.user_id
-    WHERE u.company_id = ? AND u.role = 'learner'
-    GROUP BY u.id
-    ORDER BY avg_completion DESC
-    LIMIT 5
-  `).all(companyId) as { name: string; department: string; avg_completion: number; certificates: number }[];
+  // ---- Top Performers ----
+  const { data: learnerUsers } = await supabase
+    .from('users')
+    .select('id, name, department')
+    .eq('company_id', companyId)
+    .eq('role', 'learner');
+
+  const { data: allCerts } = await supabase
+    .from('certificates')
+    .select('user_id')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1]);
+
+  const certCountByUser = new Map<number, number>();
+  for (const cc of allCerts || []) {
+    certCountByUser.set(cc.user_id, (certCountByUser.get(cc.user_id) || 0) + 1);
+  }
+
+  const enrollmentsByUser = new Map<number, number[]>();
+  for (const e of enrollmentsArr) {
+    if (!enrollmentsByUser.has(e.user_id)) {
+      enrollmentsByUser.set(e.user_id, []);
+    }
+    enrollmentsByUser.get(e.user_id)!.push(e.completion_pct || 0);
+  }
+
+  const topPerformers = (learnerUsers || [])
+    .filter((u: any) => enrollmentsByUser.has(u.id))
+    .map((u: any) => {
+      const completions = enrollmentsByUser.get(u.id)!;
+      const avg = Math.round((completions.reduce((s: number, v: number) => s + v, 0) / completions.length) * 10) / 10;
+      return {
+        name: u.name,
+        department: u.department,
+        avg_completion: avg,
+        certificates: certCountByUser.get(u.id) || 0,
+      };
+    })
+    .sort((a: any, b: any) => b.avg_completion - a.avg_completion)
+    .slice(0, 5);
 
   // ---- Recent Activity ----
-  const recentEnrollments = db.prepare(`
-    SELECT
-      u.name AS user_name,
-      'enrolled in' AS action,
-      p.title AS programme_title,
-      e.enrolled_at AS time
-    FROM enrollments e
-    JOIN users u ON e.user_id = u.id
-    JOIN programmes p ON e.programme_id = p.id
-    WHERE u.company_id = ?
-    ORDER BY e.enrolled_at DESC
-    LIMIT 4
-  `).all(companyId) as { user_name: string; action: string; programme_title: string; time: string }[];
+  const { data: recentEnrollRaw } = await supabase
+    .from('enrollments')
+    .select('enrolled_at, user_id, users(name), programmes(title)')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1])
+    .order('enrolled_at', { ascending: false })
+    .limit(4);
 
-  const recentCertificates = db.prepare(`
-    SELECT
-      u.name AS user_name,
-      'earned certificate in' AS action,
-      p.title AS programme_title,
-      c.issued_at AS time
-    FROM certificates c
-    JOIN users u ON c.user_id = u.id
-    JOIN programmes p ON c.programme_id = p.id
-    WHERE u.company_id = ?
-    ORDER BY c.issued_at DESC
-    LIMIT 3
-  `).all(companyId) as { user_name: string; action: string; programme_title: string; time: string }[];
+  const recentEnrollments = (recentEnrollRaw || []).map((e: any) => ({
+    user_name: e.users?.name || '',
+    action: 'enrolled in',
+    programme_title: e.programmes?.title || '',
+    time: e.enrolled_at,
+  }));
+
+  const { data: recentCertRaw } = await supabase
+    .from('certificates')
+    .select('issued_at, user_id, users(name), programmes(title)')
+    .in('user_id', companyUserIds.length > 0 ? companyUserIds : [-1])
+    .order('issued_at', { ascending: false })
+    .limit(3);
+
+  const recentCertificates = (recentCertRaw || []).map((cc: any) => ({
+    user_name: cc.users?.name || '',
+    action: 'earned certificate in',
+    programme_title: cc.programmes?.title || '',
+    time: cc.issued_at,
+  }));
 
   const recentActivity = [...recentEnrollments, ...recentCertificates]
     .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
@@ -141,9 +165,11 @@ export default async function DashboardPage() {
     .map(a => ({ ...a, time: timeAgo(a.time) }));
 
   // ---- Company Info ----
-  const company = db.prepare(`
-    SELECT name, plan_tier FROM companies WHERE id = ?
-  `).get(companyId) as { name: string; plan_tier: string } | undefined;
+  const { data: company } = await supabase
+    .from('companies')
+    .select('name, plan_tier')
+    .eq('id', companyId)
+    .maybeSingle();
 
   const companyName = company?.name || user.company_name || 'Your Company';
   const planTier = company?.plan_tier || 'standard';

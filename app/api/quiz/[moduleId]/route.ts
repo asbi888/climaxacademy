@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
-import type { QuizQuestion } from '@/db';
+import { supabase } from '@/db';
 
 export async function GET(
   request: Request,
@@ -13,15 +12,12 @@ export async function GET(
   const { moduleId } = await params;
   const modId = Number(moduleId);
 
-  const db = getDb();
+  const { data: questions, error } = await supabase
+    .from('quiz_questions')
+    .select('id, module_id, question_text, option_a, option_b, option_c, option_d')
+    .eq('module_id', modId);
 
-  const questions = db.prepare(`
-    SELECT id, module_id, question_text, option_a, option_b, option_c, option_d
-    FROM quiz_questions
-    WHERE module_id = ?
-  `).all(modId) as Omit<QuizQuestion, 'correct_option' | 'explanation'>[];
-
-  if (questions.length === 0) {
+  if (error || !questions || questions.length === 0) {
     return NextResponse.json({ error: 'No questions found' }, { status: 404 });
   }
 

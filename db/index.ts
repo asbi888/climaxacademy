@@ -1,35 +1,9 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { createClient } from '@supabase/supabase-js';
 
-const DB_PATH = path.join(process.cwd(), 'db', 'climax-academy.db');
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-let _db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (!_db) {
-    const isNew = !fs.existsSync(DB_PATH);
-    _db = new Database(DB_PATH);
-    _db.pragma('journal_mode = WAL');
-    _db.pragma('foreign_keys = ON');
-
-    if (isNew) {
-      const schemaPath = path.join(process.cwd(), 'db', 'schema.sql');
-      const seedPath = path.join(process.cwd(), 'db', 'seed.sql');
-
-      const schema = fs.readFileSync(schemaPath, 'utf-8');
-      const seed = fs.readFileSync(seedPath, 'utf-8');
-
-      _db.exec(schema);
-      _db.exec(seed);
-
-      console.log('[Climax Academy] Database initialized with schema and seed data.');
-    } else {
-      console.log('[Climax Academy] Database connection established.');
-    }
-  }
-  return _db;
-}
+export const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Type helpers for common queries
 export interface Company {

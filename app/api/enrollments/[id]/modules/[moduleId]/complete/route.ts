@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
-import type { ModuleProgress, Module } from '@/db';
+import { supabase } from '@/db';
 
 export async function POST(
   request: Request,
@@ -14,34 +13,37 @@ export async function POST(
   const enrollmentId = Number(id);
   const modId = Number(moduleId);
 
-  const db = getDb();
-
-  // Verify enrollment belongs to user
-  const enrollment = db.prepare(`
-    SELECT * FROM enrollments WHERE id = ? AND user_id = ?
-  `).get(enrollmentId, user.id) as { id: number; programme_id: number; status: string } | undefined;
+  const { data: enrollment } = await supabase
+    .from('enrollments')
+    .select('*')
+    .eq('id', enrollmentId)
+    .eq('user_id', user.id)
+    .single();
 
   if (!enrollment) {
     return NextResponse.json({ error: 'Enrollment not found' }, { status: 404 });
   }
 
-  // Verify module belongs to programme
-  const module_ = db.prepare(`
-    SELECT * FROM modules WHERE id = ? AND programme_id = ?
-  `).get(modId, enrollment.programme_id) as Module | undefined;
+  const { data: module_ } = await supabase
+    .from('modules')
+    .select('*')
+    .eq('id', modId)
+    .eq('programme_id', enrollment.programme_id)
+    .single();
 
   if (!module_) {
     return NextResponse.json({ error: 'Module not found' }, { status: 404 });
   }
 
-  // Check if module progress exists
-  const progress = db.prepare(`
-    SELECT * FROM module_progress WHERE module_id = ? AND enrollment_id = ?
-  `).get(modId, enrollmentId) as ModuleProgress | undefined;
+  const { data: progress } = await supabase
+    .from('module_progress')
+    .select('*')
+    .eq('module_id', modId)
+    .eq('enrollment_id', enrollmentId)
+    .maybeSingle();
 
   const now = new Date().toISOString();
 
-  // Optionally receive quiz_score from the request body
   let quizScore: number | null = null;
   try {
     const body = await request.json();
@@ -49,101 +51,121 @@ export async function POST(
       quizScore = body.quiz_score;
     }
   } catch {
-    // No body or invalid JSON -- that's fine for non-quiz modules
+    // No body or invalid JSON -- fine for non-quiz modules
   }
 
   if (progress) {
-    // Update existing progress to completed
-    db.prepare(`
-      UPDATE module_progress
-      SET status = 'completed', completed_at = ?, quiz_score = COALESCE(?, quiz_score)
-      WHERE module_id = ? AND enrollment_id = ?
-    `).run(now, quizScore, modId, enrollmentId);
+    const updateData: Record<string, any> = { status: 'completed', completed_at: now };
+    if (quizScore !== null) updateData.quiz_score = quizScore;
+    await supabase
+      .from('module_progress')
+      .update(updateData)
+      .eq('module_id', modId)
+      .eq('enrollment_id', enrollmentId);
   } else {
-    // Create new completed progress record
-    db.prepare(`
-      INSERT INTO module_progress (user_id, module_id, enrollment_id, status, started_at, completed_at, quiz_score, time_spent_minutes)
-      VALUES (?, ?, ?, 'completed', ?, ?, ?, 0)
-    `).run(user.id, modId, enrollmentId, now, now, quizScore);
+    await supabase.from('module_progress').insert({
+      user_id: user.id,
+      module_id: modId,
+      enrollment_id: enrollmentId,
+      status: 'completed',
+      started_at: now,
+      completed_at: now,
+      quiz_score: quizScore,
+      time_spent_minutes: 0,
+    });
   }
 
-  // Unlock next module
-  const nextModule = db.prepare(`
-    SELECT * FROM modules
-    WHERE programme_id = ? AND order_index > ?
-    ORDER BY order_index ASC LIMIT 1
-  `).get(enrollment.programme_id, module_.order_index) as Module | undefined;
+  const { data: nextModule } = await supabase
+    .from('modules')
+    .select('*')
+    .eq('programme_id', enrollment.programme_id)
+    .gt('order_index', module_.order_index)
+    .order('order_index')
+    .limit(1)
+    .maybeSingle();
 
   if (nextModule) {
-    const nextProgress = db.prepare(`
-      SELECT * FROM module_progress WHERE module_id = ? AND enrollment_id = ?
-    `).get(nextModule.id, enrollmentId) as ModuleProgress | undefined;
+    const { data: nextProgress } = await supabase
+      .from('module_progress')
+      .select('*')
+      .eq('module_id', nextModule.id)
+      .eq('enrollment_id', enrollmentId)
+      .maybeSingle();
 
     if (nextProgress) {
-      // Only update if currently locked
       if (nextProgress.status === 'locked') {
-        db.prepare(`
-          UPDATE module_progress SET status = 'available', started_at = ?
-          WHERE module_id = ? AND enrollment_id = ?
-        `).run(now, nextModule.id, enrollmentId);
+        await supabase
+          .from('module_progress')
+          .update({ status: 'available', started_at: now })
+          .eq('module_id', nextModule.id)
+          .eq('enrollment_id', enrollmentId);
       }
     } else {
-      // Create progress record as available
-      db.prepare(`
-        INSERT INTO module_progress (user_id, module_id, enrollment_id, status, started_at, time_spent_minutes)
-        VALUES (?, ?, ?, 'available', ?, 0)
-      `).run(user.id, nextModule.id, enrollmentId, now);
+      await supabase.from('module_progress').insert({
+        user_id: user.id,
+        module_id: nextModule.id,
+        enrollment_id: enrollmentId,
+        status: 'available',
+        started_at: now,
+        time_spent_minutes: 0,
+      });
     }
   }
 
-  // Recalculate completion percentage
-  const totalModules = db.prepare(`
-    SELECT COUNT(*) as count FROM modules WHERE programme_id = ?
-  `).get(enrollment.programme_id) as { count: number };
+  const { count: totalModules } = await supabase
+    .from('modules')
+    .select('*', { count: 'exact', head: true })
+    .eq('programme_id', enrollment.programme_id);
 
-  const completedModules = db.prepare(`
-    SELECT COUNT(*) as count FROM module_progress
-    WHERE enrollment_id = ? AND status = 'completed'
-  `).get(enrollmentId) as { count: number };
+  const { count: completedModules } = await supabase
+    .from('module_progress')
+    .select('*', { count: 'exact', head: true })
+    .eq('enrollment_id', enrollmentId)
+    .eq('status', 'completed');
 
-  const completionPct = totalModules.count > 0
-    ? Math.round((completedModules.count / totalModules.count) * 1000) / 10
+  const total = totalModules || 0;
+  const completed = completedModules || 0;
+  const completionPct = total > 0
+    ? Math.round((completed / total) * 1000) / 10
     : 0;
 
-  // Check if all modules are complete
-  const allComplete = completedModules.count >= totalModules.count;
+  const allComplete = completed >= total;
 
   if (allComplete) {
-    // Mark enrollment as completed
-    db.prepare(`
-      UPDATE enrollments SET status = 'completed', completion_pct = 100.0, completed_at = ?
-      WHERE id = ?
-    `).run(now, enrollmentId);
+    await supabase
+      .from('enrollments')
+      .update({ status: 'completed', completion_pct: 100.0, completed_at: now })
+      .eq('id', enrollmentId);
 
-    // Check if a certificate already exists
-    const existingCert = db.prepare(`
-      SELECT id FROM certificates WHERE enrollment_id = ?
-    `).get(enrollmentId);
+    const { data: existingCert } = await supabase
+      .from('certificates')
+      .select('id')
+      .eq('enrollment_id', enrollmentId)
+      .maybeSingle();
 
     if (!existingCert) {
-      // Generate certificate number
-      const certCount = db.prepare(`SELECT COUNT(*) as count FROM certificates`).get() as { count: number };
-      const certNumber = `CLX-${new Date().getFullYear()}-${String(certCount.count + 1).padStart(4, '0')}`;
+      const { count: certCount } = await supabase
+        .from('certificates')
+        .select('*', { count: 'exact', head: true });
 
+      const certNumber = `CLX-${new Date().getFullYear()}-${String((certCount || 0) + 1).padStart(4, '0')}`;
       const validUntil = new Date();
       validUntil.setFullYear(validUntil.getFullYear() + 2);
 
-      db.prepare(`
-        INSERT INTO certificates (user_id, programme_id, enrollment_id, certificate_number, issued_at, valid_until)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(user.id, enrollment.programme_id, enrollmentId, certNumber, now, validUntil.toISOString());
+      await supabase.from('certificates').insert({
+        user_id: user.id,
+        programme_id: enrollment.programme_id,
+        enrollment_id: enrollmentId,
+        certificate_number: certNumber,
+        issued_at: now,
+        valid_until: validUntil.toISOString(),
+      });
     }
   } else {
-    // Update progress percentage and ensure status is in_progress
-    db.prepare(`
-      UPDATE enrollments SET status = 'in_progress', completion_pct = ?
-      WHERE id = ?
-    `).run(completionPct, enrollmentId);
+    await supabase
+      .from('enrollments')
+      .update({ status: 'in_progress', completion_pct: completionPct })
+      .eq('id', enrollmentId);
   }
 
   return NextResponse.json({

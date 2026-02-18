@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
-import { getDb } from '@/db';
+import { supabase } from '@/db';
 import { formatDate, getCategoryColor, formatMinutes } from '@/lib/utils';
 import CircularProgress from '@/components/ui/CircularProgress';
 import ProgressBar from '@/components/ui/ProgressBar';
@@ -44,28 +44,41 @@ export default async function LearnDashboard() {
   const user = await getCurrentUser();
   if (!user) redirect('/login');
 
-  const db = getDb();
-
   // Fetch user's enrollments with programme data
-  const enrollments = db.prepare(`
-    SELECT e.*, p.title, p.slug, p.category, p.duration_hours, p.module_count,
-           p.thumbnail_gradient, p.difficulty_level
-    FROM enrollments e
-    JOIN programmes p ON e.programme_id = p.id
-    WHERE e.user_id = ?
-    ORDER BY e.enrolled_at DESC
-  `).all(user.id) as EnrollmentRow[];
+  const { data: enrollmentRows } = await supabase
+    .from('enrollments')
+    .select('*, programmes(title, slug, category, duration_hours, module_count, thumbnail_gradient, difficulty_level)')
+    .eq('user_id', user.id)
+    .order('enrolled_at', { ascending: false });
+
+  const enrollments: EnrollmentRow[] = (enrollmentRows || []).map((e: any) => ({
+    id: e.id,
+    user_id: e.user_id,
+    programme_id: e.programme_id,
+    enrolled_at: e.enrolled_at,
+    status: e.status,
+    completion_pct: e.completion_pct,
+    completed_at: e.completed_at,
+    title: e.programmes?.title,
+    slug: e.programmes?.slug,
+    category: e.programmes?.category,
+    duration_hours: e.programmes?.duration_hours,
+    module_count: e.programmes?.module_count,
+    thumbnail_gradient: e.programmes?.thumbnail_gradient,
+    difficulty_level: e.programmes?.difficulty_level,
+  }));
 
   // Count certificates
-  const certCount = db.prepare(`
-    SELECT COUNT(*) as count FROM certificates WHERE user_id = ?
-  `).get(user.id) as { count: number };
+  const { count: certCountVal } = await supabase
+    .from('certificates')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', user.id);
 
   // Stats
   const totalProgrammes = enrollments.length;
   const completedProgrammes = enrollments.filter((e) => e.status === 'completed').length;
   const inProgressProgrammes = enrollments.filter((e) => e.status === 'in_progress').length;
-  const certificates = certCount.count;
+  const certificates = certCountVal || 0;
 
   // Find the first in_progress enrollment for "Continue Learning"
   const continueEnrollment = enrollments.find((e) => e.status === 'in_progress');
@@ -73,15 +86,32 @@ export default async function LearnDashboard() {
   // Get next module for the continue enrollment
   let nextModule: NextModuleRow | null = null;
   if (continueEnrollment) {
-    nextModule = db.prepare(`
-      SELECT m.id, m.title, m.duration_minutes, m.content_type
-      FROM modules m
-      LEFT JOIN module_progress mp ON mp.module_id = m.id AND mp.enrollment_id = ?
-      WHERE m.programme_id = ?
-        AND (mp.status IS NULL OR mp.status != 'completed')
-      ORDER BY m.order_index ASC
-      LIMIT 1
-    `).get(continueEnrollment.id, continueEnrollment.programme_id) as NextModuleRow | null;
+    // Fetch all modules for the programme
+    const { data: allMods } = await supabase
+      .from('modules')
+      .select('id, title, duration_minutes, content_type, order_index')
+      .eq('programme_id', continueEnrollment.programme_id)
+      .order('order_index');
+
+    // Fetch completed module IDs for this enrollment
+    const { data: completedProgress } = await supabase
+      .from('module_progress')
+      .select('module_id')
+      .eq('enrollment_id', continueEnrollment.id)
+      .eq('status', 'completed');
+
+    const completedModuleIds = new Set((completedProgress || []).map((p: any) => p.module_id));
+
+    // Find first non-completed module
+    const firstIncomplete = (allMods || []).find((m: any) => !completedModuleIds.has(m.id));
+    if (firstIncomplete) {
+      nextModule = {
+        id: firstIncomplete.id,
+        title: firstIncomplete.title,
+        duration_minutes: firstIncomplete.duration_minutes,
+        content_type: firstIncomplete.content_type,
+      };
+    }
   }
 
   const stats = [
